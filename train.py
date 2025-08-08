@@ -30,16 +30,16 @@ ZEROS: list[tuple[str, float]] = [
     ("dof_left_shoulder_yaw_02", 0.0),
     ("dof_left_elbow_02", math.radians(-90.0)),
     ("dof_left_wrist_00", 0.0),
-    ("dof_right_hip_pitch_04", math.radians(-10.0)),
+    ("dof_right_hip_pitch_04", math.radians(-20.0)),
     ("dof_right_hip_roll_03", math.radians(-0.0)),
     ("dof_right_hip_yaw_03", 0.0),
-    ("dof_right_knee_04", math.radians(-20.0)),
-    ("dof_right_ankle_02", math.radians(10.0)),
-    ("dof_left_hip_pitch_04", math.radians(10.0)),
+    ("dof_right_knee_04", math.radians(-50.0)),
+    ("dof_right_ankle_02", math.radians(30.0)),
+    ("dof_left_hip_pitch_04", math.radians(20.0)),
     ("dof_left_hip_roll_03", math.radians(0.0)),
     ("dof_left_hip_yaw_03", 0.0),
-    ("dof_left_knee_04", math.radians(20.0)),
-    ("dof_left_ankle_02", math.radians(-10.0)),
+    ("dof_left_knee_04", math.radians(50.0)),
+    ("dof_left_ankle_02", math.radians(-30.0)),
 ]
 
 
@@ -168,9 +168,9 @@ class StraightLegPenalty(JointPositionPenalty):
         return cls.create_from_names(
             names=[
                 "dof_left_hip_roll_03",
-                "dof_left_hip_yaw_03",
+                # "dof_left_hip_yaw_03",
                 "dof_right_hip_roll_03",
-                "dof_right_hip_yaw_03",
+                # "dof_right_hip_yaw_03",
             ],
             physics_model=physics_model,
             scale=scale,
@@ -515,34 +515,34 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                     strafe_speed=self.config.target_linear_velocity / 2.0,
                     rotation_speed=self.config.target_angular_velocity,
                     # Only allow forward and standing.
-                    sample_probs=(0.3, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    # sample_probs=(0.3, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
                 ),
             ),
             ksim.BaseHeightCommand(
-                min_height=0.7,
-                max_height=1.0,
+                min_height=0.9,
+                max_height=1.02,
             ),
         ]
 
     def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:
         return [
             # Standard rewards.
-            ksim.StayAliveReward(scale=25.0),
+            # ksim.StayAliveReward(balance=2.0, scale=1.0),
+            ksim.BaseHeightTrackingReward(scale=0.5),
             # ksim.UprightReward(scale=1.0),
             ksim.EasyJoystickReward(
                 gait=ksim.SinusoidalGaitReward(
-                    scale=4.0,
+                    scale=0.4,
                     ctrl_dt=self.config.ctrl_dt,
                     max_height=self.config.max_foot_height,
                 ),
-                joystick=ksim.JoystickReward(scale=1.0),
+                joystick=ksim.JoystickReward(scale=0.1),
                 airtime=ksim.FeetAirTimeReward(
                     threshold=self.config.gait_period / 2.0,
                     ctrl_dt=self.config.ctrl_dt,
-                    scale=1.0,
+                    scale=0.1,
                 ),
             ),
-            ksim.BaseHeightTrackingReward(scale=1.0),
             # Avoid movement penalties.
             # ksim.AngularVelocityPenalty(index=("x", "y"), scale=-0.1),
             # ksim.LinearVelocityPenalty(index=("z"), scale=-0.1),
@@ -560,14 +560,15 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
         return [
-            ksim.BadZTermination(unhealthy_z_lower=0.5, unhealthy_z_upper=1.2),
+            ksim.BadZTermination(unhealthy_z_lower=0.7, unhealthy_z_upper=1.2),
             ksim.FarFromOriginTermination(max_dist=10.0),
         ]
 
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
-        return ksim.DistanceFromOriginCurriculum(
-            min_level_steps=5,
-        )
+        # return ksim.DistanceFromOriginCurriculum(
+        #     min_level_steps=5,
+        # )
+        return ksim.ConstantCurriculum(level=1.0)
 
     def get_model(self, params: ksim.InitParams) -> Model:
         return Model(
