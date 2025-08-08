@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Self
 
 import attrs
-import distrax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -17,7 +16,7 @@ import mujoco_scenes
 import mujoco_scenes.mjcf
 import optax
 import xax
-from jaxtyping import Array, PRNGKeyArray
+from jaxtyping import Array, PRNGKeyArray, PyTree
 
 # These are in the order of the neural network outputs.
 ZEROS: list[tuple[str, float]] = [
@@ -31,16 +30,16 @@ ZEROS: list[tuple[str, float]] = [
     ("dof_left_shoulder_yaw_02", 0.0),
     ("dof_left_elbow_02", math.radians(-90.0)),
     ("dof_left_wrist_00", 0.0),
-    ("dof_right_hip_pitch_04", math.radians(-20.0)),
+    ("dof_right_hip_pitch_04", math.radians(-10.0)),
     ("dof_right_hip_roll_03", math.radians(-0.0)),
     ("dof_right_hip_yaw_03", 0.0),
-    ("dof_right_knee_04", math.radians(-50.0)),
-    ("dof_right_ankle_02", math.radians(30.0)),
-    ("dof_left_hip_pitch_04", math.radians(20.0)),
+    ("dof_right_knee_04", math.radians(-20.0)),
+    ("dof_right_ankle_02", math.radians(10.0)),
+    ("dof_left_hip_pitch_04", math.radians(10.0)),
     ("dof_left_hip_roll_03", math.radians(0.0)),
     ("dof_left_hip_yaw_03", 0.0),
-    ("dof_left_knee_04", math.radians(50.0)),
-    ("dof_left_ankle_02", math.radians(-30.0)),
+    ("dof_left_knee_04", math.radians(20.0)),
+    ("dof_left_ankle_02", math.radians(-10.0)),
 ]
 
 
@@ -50,30 +49,56 @@ class HumanoidWalkingTaskConfig(ksim.PPOConfig):
 
     # Model parameters.
     hidden_size: int = xax.field(
-        value=128,
+        value=512,
         help="The hidden size for the MLPs.",
     )
     depth: int = xax.field(
-        value=5,
+        value=2,
         help="The depth for the MLPs.",
     )
     num_mixtures: int = xax.field(
         value=5,
         help="The number of mixtures for the actor.",
     )
+    num_hidden_layers: int = xax.field(
+        value=2,
+        help="The number of hidden layers for the MLPs.",
+    )
     var_scale: float = xax.field(
         value=0.5,
         help="The scale for the standard deviations of the actor.",
     )
-    use_acc_gyro: bool = xax.field(
-        value=True,
-        help="Whether to use the IMU acceleration and gyroscope observations.",
+
+    # Reward parameters.
+    target_linear_velocity: float = xax.field(
+        value=3.0,
+        help="The linear velocity for the joystick command.",
+    )
+    target_angular_velocity: float = xax.field(
+        value=math.radians(90.0),
+        help="The angular velocity for the joystick command.",
+    )
+    gait_period: float = xax.field(
+        value=0.6,
+        help="The period for the sinusoidal gait command.",
+    )
+    max_foot_height: float = xax.field(
+        value=0.2,
+        help="The maximum height for the sinusoidal gait command.",
     )
 
     # Optimizer parameters.
     learning_rate: float = xax.field(
         value=3e-4,
         help="Learning rate for PPO.",
+    )
+    grad_clip: float = xax.field(
+        value=1.0,
+        help="Gradient clipping for the optimizer.",
+    )
+    warmup_steps: int = xax.field(
+        value=1000,
+        help="Number of warmup steps for the optimizer.",
     )
     adam_weight_decay: float = xax.field(
         value=1e-5,
@@ -158,18 +183,20 @@ class Actor(eqx.Module):
 
     input_proj: eqx.nn.Linear
     rnns: tuple[eqx.nn.GRUCell, ...]
-    output_proj: eqx.nn.Linear
-    num_inputs: int = eqx.static_field()
-    num_outputs: int = eqx.static_field()
-    num_mixtures: int = eqx.static_field()
-    min_std: float = eqx.static_field()
-    max_std: float = eqx.static_field()
-    var_scale: float = eqx.static_field()
+    output_proj: eqx.nn.MLP
+    num_inputs: int = eqx.field()
+    num_outputs: int = eqx.field()
+    num_mixtures: int = eqx.field()
+    clip_positions: ksim.ClipPositions = eqx.field()
+    min_std: float = eqx.field()
+    max_std: float = eqx.field()
+    var_scale: float = eqx.field()
 
     def __init__(
         self,
         key: PRNGKeyArray,
         *,
+        physics_model: ksim.PhysicsModel,
         num_inputs: int,
         num_outputs: int,
         min_std: float,
@@ -178,6 +205,7 @@ class Actor(eqx.Module):
         hidden_size: int,
         num_mixtures: int,
         depth: int,
+        num_hidden_layers: int,
     ) -> None:
         # Project input to hidden size
         key, input_proj_key = jax.random.split(key)
@@ -202,20 +230,25 @@ class Actor(eqx.Module):
         )
 
         # Project to output
-        self.output_proj = eqx.nn.Linear(
-            in_features=hidden_size,
-            out_features=num_outputs * 3 * num_mixtures,
+        self.output_proj = eqx.nn.MLP(
+            in_size=hidden_size,
+            out_size=num_outputs * 3 * num_mixtures,
+            width_size=hidden_size,
+            depth=num_hidden_layers,
+            activation=jax.nn.gelu,
+            use_final_bias=False,
             key=key,
         )
 
         self.num_inputs = num_inputs
         self.num_outputs = num_outputs
         self.num_mixtures = num_mixtures
+        self.clip_positions = ksim.ClipPositions.from_physics_model(physics_model)
         self.min_std = min_std
         self.max_std = max_std
         self.var_scale = var_scale
 
-    def forward(self, obs_n: Array, carry: Array) -> tuple[distrax.Distribution, Array]:
+    def forward(self, obs_n: Array, carry: Array) -> tuple[xax.Distribution, Array]:
         x_n = self.input_proj(obs_n)
         out_carries = []
         for i, rnn in enumerate(self.rnns):
@@ -235,7 +268,10 @@ class Actor(eqx.Module):
         # Apply bias to the means.
         mean_nm = mean_nm + jnp.array([v for _, v in ZEROS])[:, None]
 
-        dist_n = ksim.MixtureOfGaussians(means_nm=mean_nm, stds_nm=std_nm, logits_nm=logits_nm)
+        # Clip the target positions to the minimum and maximum ranges.
+        mean_nm = jax.vmap(self.clip_positions.clip, in_axes=-1, out_axes=-1)(mean_nm)
+
+        dist_n = xax.MixtureOfGaussians(means_nm=mean_nm, stds_nm=std_nm, logits_nm=logits_nm)
 
         return dist_n, jnp.stack(out_carries, axis=0)
 
@@ -245,8 +281,8 @@ class Critic(eqx.Module):
 
     input_proj: eqx.nn.Linear
     rnns: tuple[eqx.nn.GRUCell, ...]
-    output_proj: eqx.nn.Linear
-    num_inputs: int = eqx.static_field()
+    output_proj: eqx.nn.MLP
+    num_inputs: int = eqx.field()
 
     def __init__(
         self,
@@ -255,6 +291,7 @@ class Critic(eqx.Module):
         num_inputs: int,
         hidden_size: int,
         depth: int,
+        num_hidden_layers: int,
     ) -> None:
         num_outputs = 1
 
@@ -280,10 +317,14 @@ class Critic(eqx.Module):
             ]
         )
 
-        # Project to output
-        self.output_proj = eqx.nn.Linear(
-            in_features=hidden_size,
-            out_features=num_outputs,
+        # Create MLP
+        self.output_proj = eqx.nn.MLP(
+            in_size=hidden_size,
+            out_size=num_outputs,
+            width_size=hidden_size,
+            depth=num_hidden_layers,
+            activation=jax.nn.elu,
+            use_final_bias=False,
             key=key,
         )
 
@@ -308,6 +349,7 @@ class Model(eqx.Module):
         self,
         key: PRNGKeyArray,
         *,
+        physics_model: ksim.PhysicsModel,
         num_actor_inputs: int,
         num_actor_outputs: int,
         num_critic_inputs: int,
@@ -317,10 +359,12 @@ class Model(eqx.Module):
         hidden_size: int,
         num_mixtures: int,
         depth: int,
+        num_hidden_layers: int,
     ) -> None:
         actor_key, critic_key = jax.random.split(key)
         self.actor = Actor(
             actor_key,
+            physics_model=physics_model,
             num_inputs=num_actor_inputs,
             num_outputs=num_actor_outputs,
             min_std=min_std,
@@ -329,29 +373,40 @@ class Model(eqx.Module):
             hidden_size=hidden_size,
             num_mixtures=num_mixtures,
             depth=depth,
+            num_hidden_layers=num_hidden_layers,
         )
         self.critic = Critic(
             critic_key,
             hidden_size=hidden_size,
             depth=depth,
             num_inputs=num_critic_inputs,
+            num_hidden_layers=num_hidden_layers,
         )
 
 
 class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
     def get_optimizer(self) -> optax.GradientTransformation:
-        return (
-            optax.adam(self.config.learning_rate)
-            if self.config.adam_weight_decay == 0.0
-            else optax.adamw(self.config.learning_rate, weight_decay=self.config.adam_weight_decay)
+        scheduler = optax.warmup_constant_schedule(
+            init_value=self.config.learning_rate * 0.01,
+            peak_value=self.config.learning_rate,
+            warmup_steps=self.config.warmup_steps,
+        )
+
+        return optax.chain(
+            optax.zero_nans(),
+            optax.clip_by_global_norm(self.config.grad_clip),
+            optax.add_decayed_weights(self.config.adam_weight_decay),
+            optax.scale_by_adam(),
+            optax.scale_by_schedule(scheduler),
+            optax.scale(-1.0),
         )
 
     def get_mujoco_model(self) -> mujoco.MjModel:
-        mjcf_path = asyncio.run(ksim.get_mujoco_model_path("kbot", name="robot"))
+        mjcf_path = asyncio.run(ksim.get_mujoco_model_path("kbot-headless", name="robot"))
         return mujoco_scenes.mjcf.load_mjmodel(mjcf_path, scene="smooth")
 
     def get_mujoco_model_metadata(self, mj_model: mujoco.MjModel) -> ksim.Metadata:
-        metadata = asyncio.run(ksim.get_mujoco_model_metadata("kbot"))
+        metadata = asyncio.run(ksim.get_mujoco_model_metadata("kbot-headless"))
         if metadata.joint_name_to_metadata is None:
             raise ValueError("Joint metadata is not available")
         if metadata.actuator_type_to_metadata is None:
@@ -372,6 +427,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
     def get_physics_randomizers(self, physics_model: ksim.PhysicsModel) -> list[ksim.PhysicsRandomizer]:
         return [
             ksim.StaticFrictionRandomizer(),
+            ksim.FloorFrictionRandomizer.from_geom_name(physics_model, "floor"),
             ksim.ArmatureRandomizer(),
             ksim.AllBodiesMassMultiplicationRandomizer(scale_lower=0.95, scale_upper=1.05),
             ksim.JointDampingRandomizer(),
@@ -380,15 +436,11 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
 
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
         return [
-            ksim.PushEvent(
-                x_force=1.0,
-                y_force=1.0,
-                z_force=0.3,
-                force_range=(0.5, 1.0),
-                x_angular_force=0.0,
-                y_angular_force=0.0,
-                z_angular_force=0.0,
-                interval_range=(0.5, 4.0),
+            ksim.LinearPushEvent(
+                linvel=0.2,
+                vel_range=(0.0, 1.0),
+                interval_range=(0.5, 2.0),
+                curriculum_range=(0.0, 1.0),  # Always apply pushes.
             ),
         ]
 
@@ -402,7 +454,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
         return [
             ksim.TimestepObservation(),
             ksim.JointPositionObservation(noise=math.radians(2)),
-            ksim.JointVelocityObservation(noise=math.radians(10)),
+            ksim.JointVelocityObservation(noise=math.radians(30)),
             ksim.ActuatorForceObservation(),
             ksim.CenterOfMassInertiaObservation(),
             ksim.CenterOfMassVelocityObservation(),
@@ -429,31 +481,81 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                 sensor_name="imu_gyro",
                 noise=math.radians(10),
             ),
+            ksim.FeetContactObservation.create(
+                physics_model=physics_model,
+                foot_left_geom_names=[
+                    "KB_D_501L_L_LEG_FOOT_collision_capsule_0",
+                    "KB_D_501L_L_LEG_FOOT_collision_capsule_1",
+                ],
+                foot_right_geom_names=[
+                    "KB_D_501R_R_LEG_FOOT_collision_capsule_0",
+                    "KB_D_501R_R_LEG_FOOT_collision_capsule_1",
+                ],
+                floor_geom_names=["floor"],
+            ),
+            ksim.FeetPositionObservation.create(
+                physics_model=physics_model,
+                foot_left_body_name="KB_D_501L_L_LEG_FOOT",
+                foot_right_body_name="KB_D_501R_R_LEG_FOOT",
+            ),
         ]
 
     def get_commands(self, physics_model: ksim.PhysicsModel) -> list[ksim.Command]:
-        return []
+        return [
+            ksim.EasyJoystickCommand(
+                gait=ksim.SinusoidalGaitCommand(
+                    gait_period=self.config.gait_period,
+                    ctrl_dt=self.config.ctrl_dt,
+                    max_height=self.config.max_foot_height,
+                    height_offset=0.06,
+                ),
+                joystick=ksim.JoystickCommand(
+                    run_speed=self.config.target_linear_velocity,
+                    walk_speed=self.config.target_linear_velocity / 2.0,
+                    strafe_speed=self.config.target_linear_velocity / 2.0,
+                    rotation_speed=self.config.target_angular_velocity,
+                    # Only allow forward and standing.
+                    sample_probs=(0.3, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                ),
+            ),
+            ksim.BaseHeightCommand(
+                min_height=0.9,
+                max_height=1.1,
+            ),
+        ]
 
     def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:
         return [
             # Standard rewards.
-            ksim.NaiveForwardReward(clip_max=1.25, in_robot_frame=False, scale=3.0),
-            ksim.NaiveForwardOrientationReward(scale=1.0),
-            ksim.StayAliveReward(scale=1.0),
-            ksim.UprightReward(scale=0.5),
+            ksim.StayAliveReward(scale=25.0),
+            # ksim.UprightReward(scale=1.0),
+            ksim.EasyJoystickReward(
+                gait=ksim.SinusoidalGaitReward(
+                    scale=4.0,
+                    ctrl_dt=self.config.ctrl_dt,
+                    max_height=self.config.max_foot_height,
+                ),
+                joystick=ksim.JoystickReward(scale=1.0),
+                airtime=ksim.FeetAirTimeReward(
+                    threshold=self.config.gait_period / 2.0,
+                    ctrl_dt=self.config.ctrl_dt,
+                    scale=1.0,
+                ),
+            ),
+            ksim.BaseHeightTrackingReward(scale=1.0),
             # Avoid movement penalties.
-            ksim.AngularVelocityPenalty(index=("x", "y"), scale=-0.1),
-            ksim.LinearVelocityPenalty(index=("z"), scale=-0.1),
+            # ksim.AngularVelocityPenalty(index=("x", "y"), scale=-0.1),
+            # ksim.LinearVelocityPenalty(index=("z"), scale=-0.1),
             # Normalization penalties.
-            ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
-            ksim.JointAccelerationPenalty(scale=-0.01, scale_by_curriculum=True),
-            ksim.JointJerkPenalty(scale=-0.01, scale_by_curriculum=True),
-            ksim.LinkAccelerationPenalty(scale=-0.01, scale_by_curriculum=True),
-            ksim.LinkJerkPenalty(scale=-0.01, scale_by_curriculum=True),
-            ksim.ActionAccelerationPenalty(scale=-0.01, scale_by_curriculum=True),
+            # ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
+            # ksim.JointAccelerationPenalty(scale=-0.01),
+            # ksim.JointJerkPenalty(scale=-0.01),
+            # ksim.LinkAccelerationPenalty(scale=-0.01),
+            # ksim.LinkJerkPenalty(scale=-0.01),
+            # ksim.ActionAccelerationPenalty(scale=-0.01),
             # Bespoke rewards.
-            BentArmPenalty.create_penalty(physics_model, scale=-0.1),
-            StraightLegPenalty.create_penalty(physics_model, scale=-0.1),
+            # BentArmPenalty.create_penalty(physics_model, scale=-1.0),
+            # StraightLegPenalty.create_penalty(physics_model, scale=-1.0),
         ]
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
@@ -467,46 +569,52 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             min_level_steps=5,
         )
 
-    def get_model(self, key: PRNGKeyArray) -> Model:
+    def get_model(self, params: ksim.InitParams) -> Model:
         return Model(
-            key,
-            num_actor_inputs=51 if self.config.use_acc_gyro else 45,
+            params.key,
+            physics_model=params.physics_model,
+            num_actor_inputs=56,
             num_actor_outputs=len(ZEROS),
-            num_critic_inputs=446,
-            min_std=0.001,
+            num_critic_inputs=457,
+            min_std=0.01,
             max_std=1.0,
             var_scale=self.config.var_scale,
             hidden_size=self.config.hidden_size,
             num_mixtures=self.config.num_mixtures,
             depth=self.config.depth,
+            num_hidden_layers=self.config.num_hidden_layers,
         )
 
     def run_actor(
         self,
         model: Actor,
-        observations: xax.FrozenDict[str, Array],
-        commands: xax.FrozenDict[str, Array],
+        observations: xax.FrozenDict[str, PyTree],
+        commands: xax.FrozenDict[str, PyTree],
         carry: Array,
-    ) -> tuple[distrax.Distribution, Array]:
-        time_1 = observations["timestep_observation"]
+    ) -> tuple[xax.Distribution, Array]:
         joint_pos_n = observations["joint_position_observation"]
         joint_vel_n = observations["joint_velocity_observation"]
         proj_grav_3 = observations["projected_gravity_observation"]
-        imu_acc_3 = observations["sensor_observation_imu_acc"]
         imu_gyro_3 = observations["sensor_observation_imu_gyro"]
 
+        # Sinusoidal gait joystick command.
+        sgj_cmd: ksim.EasyJoystickCommandValue = commands["easy_joystick_command"]
+        joystick_cmd_ohe_8 = sgj_cmd.joystick.command
+
+        # Foot target height.
+        gait_phase_1 = sgj_cmd.gait.phase[..., None]
+
+        base_height_1 = commands["base_height_command"][..., None]
+
         obs = [
-            jnp.sin(time_1),
-            jnp.cos(time_1),
             joint_pos_n,  # NUM_JOINTS
             joint_vel_n,  # NUM_JOINTS
             proj_grav_3,  # 3
+            imu_gyro_3,  # 3
+            gait_phase_1,  # 1
+            base_height_1,  # 1
+            joystick_cmd_ohe_8,  # 8
         ]
-        if self.config.use_acc_gyro:
-            obs += [
-                imu_acc_3,  # 3
-                imu_gyro_3,  # 3
-            ]
 
         obs_n = jnp.concatenate(obs, axis=-1)
         action, carry = model.forward(obs_n, carry)
@@ -516,8 +624,8 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
     def run_critic(
         self,
         model: Critic,
-        observations: xax.FrozenDict[str, Array],
-        commands: xax.FrozenDict[str, Array],
+        observations: xax.FrozenDict[str, PyTree],
+        commands: xax.FrozenDict[str, PyTree],
         carry: Array,
     ) -> tuple[Array, Array]:
         time_1 = observations["timestep_observation"]
@@ -531,6 +639,17 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
         act_frc_obs_n = observations["actuator_force_observation"]
         base_pos_3 = observations["base_position_observation"]
         base_quat_4 = observations["base_orientation_observation"]
+
+        # Sinusoidal gait joystick command.
+        sgj_cmd: ksim.EasyJoystickCommandValue = commands["easy_joystick_command"]
+        joystick_cmd_ohe_8 = sgj_cmd.joystick.command
+
+        # Foot height difference.
+        foot_height_2 = observations["feet_position_observation"][..., 2]
+        foot_tgt_height_2 = sgj_cmd.gait.height
+        foot_height_diff_2 = foot_height_2 - foot_tgt_height_2
+
+        base_height_1 = commands["base_height_command"][..., None]
 
         obs_n = jnp.concatenate(
             [
@@ -546,6 +665,9 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                 act_frc_obs_n / 100.0,  # NUM_JOINTS
                 base_pos_3,  # 3
                 base_quat_4,  # 4
+                joystick_cmd_ohe_8,  # 8
+                foot_height_diff_2,  # 2
+                base_height_1,  # 1
             ],
             axis=-1,
         )
@@ -586,7 +708,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
 
         next_carry = jax.tree.map(
             lambda x, y: jnp.where(transition.done, x, y),
-            self.get_initial_model_carry(rng),
+            self.get_initial_model_carry(model, rng),
             (next_actor_carry, next_critic_carry),
         )
 
@@ -608,7 +730,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
         )
         return ppo_variables, next_model_carry
 
-    def get_initial_model_carry(self, rng: PRNGKeyArray) -> tuple[Array, Array]:
+    def get_initial_model_carry(self, model: Model, rng: PRNGKeyArray) -> tuple[Array, Array]:
         return (
             jnp.zeros(shape=(self.config.depth, self.config.hidden_size)),
             jnp.zeros(shape=(self.config.depth, self.config.hidden_size)),
@@ -632,7 +754,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             commands=commands,
             carry=actor_carry_in,
         )
-        action_j = action_dist_j.mode() if argmax else action_dist_j.sample(seed=rng)
+        action_j = action_dist_j.mode() if argmax else action_dist_j.sample(key=rng)
         return ksim.Action(action=action_j, carry=(actor_carry, critic_carry_in))
 
 
@@ -643,9 +765,7 @@ if __name__ == "__main__":
             num_envs=2048,
             batch_size=256,
             num_passes=4,
-            epochs_per_log_step=1,
-            rollout_length_seconds=8.0,
-            global_grad_clip=2.0,
+            rollout_length_frames=24,
             # Simulation parameters.
             dt=0.002,
             ctrl_dt=0.02,
@@ -654,8 +774,7 @@ if __name__ == "__main__":
             action_latency_range=(0.003, 0.01),  # Simulate 3-10ms of latency.
             drop_action_prob=0.05,  # Drop 5% of commands.
             # Visualization parameters.
+            render_markers=False,
             render_track_body_id=0,
-            # Checkpointing parameters.
-            save_every_n_seconds=60,
         ),
     )
