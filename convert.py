@@ -24,18 +24,22 @@ def main() -> None:
         raise FileNotFoundError(f"Checkpoint path {ckpt_path} does not exist")
 
     task: HumanoidWalkingTask = HumanoidWalkingTask.load_task(ckpt_path)
-    model: Model = task.load_ckpt(ckpt_path, part="model")[0]
+    mujoco_model = task.get_mujoco_model()
+    key = jax.random.PRNGKey(0)
+    init_params = ksim.InitParams(key=key, physics_model=mujoco_model)
+    model: Model = task.load_ckpt(ckpt_path, init_params=init_params, part="model")[0]
 
     # Loads the Mujoco model and gets the joint names.
-    mujoco_model = task.get_mujoco_model()
     joint_names = ksim.get_joint_names_in_order(mujoco_model)[1:]  # Removes the root joint.
 
     # Constant values.
-    carry_shape = (task.config.depth, task.config.hidden_size)
+    depth = task.config.depth
+    hidden_size = task.config.hidden_size
+    carry_shape = (depth * hidden_size + 1,)
 
     metadata = PyModelMetadata(
         joint_names=joint_names,
-        num_commands=None,
+        num_commands=8,
         carry_size=carry_shape,
     )
 
@@ -48,24 +52,36 @@ def main() -> None:
         joint_angles: Array,
         joint_angular_velocities: Array,
         projected_gravity: Array,
-        accelerometer: Array,
         gyroscope: Array,
-        time: Array,
+        command: Array,
         carry: Array,
     ) -> tuple[Array, Array]:
+        base_height = jnp.full((1,), 0.95)
+        model_carry, gait_phase = carry[..., :-1], carry[..., -1:]
+        model_carry = model_carry.reshape(depth, hidden_size)
+
+        # When not walking, keep the gait phase at 0.
+        gait_phase = jnp.where(command.argmax(axis=-1) != 0, gait_phase, 0.0)
+
+        # Call the model.
         obs = jnp.concatenate(
             [
-                jnp.sin(time),
-                jnp.cos(time),
                 joint_angles,
                 joint_angular_velocities,
                 projected_gravity,
-                accelerometer,
                 gyroscope,
+                gait_phase,
+                base_height,
+                command,
             ],
             axis=-1,
         )
-        dist, carry = model.actor.forward(obs, carry)
+        dist, model_carry = model.actor.forward(obs, model_carry)
+
+        # Step the gait phase.
+        gait_phase = (gait_phase + 0.02) % task.config.gait_period
+
+        carry = jnp.concatenate([model_carry.reshape(depth * hidden_size), gait_phase], axis=-1)
         return dist.mode(), carry
 
     init_onnx = export_fn(
