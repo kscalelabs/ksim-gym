@@ -519,8 +519,8 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                 ),
             ),
             ksim.BaseHeightCommand(
-                min_height=0.9,
-                max_height=1.1,
+                min_height=0.7,
+                max_height=1.0,
             ),
         ]
 
@@ -560,7 +560,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
         return [
-            ksim.BadZTermination(unhealthy_z_lower=0.6, unhealthy_z_upper=1.2),
+            ksim.BadZTermination(unhealthy_z_lower=0.5, unhealthy_z_upper=1.2),
             ksim.FarFromOriginTermination(max_dist=10.0),
         ]
 
