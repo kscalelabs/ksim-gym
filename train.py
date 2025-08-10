@@ -30,12 +30,12 @@ ZEROS: list[tuple[str, float]] = [
     ("dof_left_shoulder_yaw_02", 0.0),
     ("dof_left_elbow_02", math.radians(-90.0)),
     ("dof_left_wrist_00", 0.0),
-    ("dof_right_hip_pitch_04", math.radians(-20.0)),
+    ("dof_right_hip_pitch_04", math.radians(-40.0)),
     ("dof_right_hip_roll_03", math.radians(-0.0)),
     ("dof_right_hip_yaw_03", 0.0),
     ("dof_right_knee_04", math.radians(-50.0)),
     ("dof_right_ankle_02", math.radians(30.0)),
-    ("dof_left_hip_pitch_04", math.radians(20.0)),
+    ("dof_left_hip_pitch_04", math.radians(40.0)),
     ("dof_left_hip_roll_03", math.radians(0.0)),
     ("dof_left_hip_yaw_03", 0.0),
     ("dof_left_knee_04", math.radians(50.0)),
@@ -71,7 +71,7 @@ class HumanoidWalkingTaskConfig(ksim.PPOConfig):
 
     # Reward parameters.
     target_linear_velocity: float = xax.field(
-        value=3.0,
+        value=4.0,
         help="The linear velocity for the joystick command.",
     )
     target_angular_velocity: float = xax.field(
@@ -269,7 +269,7 @@ class Actor(eqx.Module):
         mean_nm = mean_nm + jnp.array([v for _, v in ZEROS])[:, None]
 
         # Clip the target positions to the minimum and maximum ranges.
-        mean_nm = jax.vmap(self.clip_positions.clip, in_axes=-1, out_axes=-1)(mean_nm)
+        # mean_nm = jax.vmap(self.clip_positions.clip, in_axes=-1, out_axes=-1)(mean_nm)
 
         dist_n = xax.MixtureOfGaussians(means_nm=mean_nm, stds_nm=std_nm, logits_nm=logits_nm)
 
@@ -411,6 +411,12 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             raise ValueError("Joint metadata is not available")
         if metadata.actuator_type_to_metadata is None:
             raise ValueError("Actuator metadata is not available")
+
+        # Patching the kd values to be smaller, to make the robot more reactive.
+        # for joint_metadata in metadata.joint_name_to_metadata.values():
+        #     assert joint_metadata.kp is not None
+        #     joint_metadata.kd = joint_metadata.kp * 0.05
+
         return metadata
 
     def get_actuators(
@@ -437,17 +443,37 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
     def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
         return [
             ksim.LinearPushEvent(
-                linvel=0.2,
-                vel_range=(0.0, 1.0),
-                interval_range=(0.5, 2.0),
-                curriculum_range=(0.0, 1.0),  # Always apply pushes.
+                linvel=1.0,
+                vel_range=(0.3, 1.0),
+                interval_range=(0.5, 4.0),
+                curriculum_range=(0.0, 1.0),
             ),
+            # ksim.JumpEvent(
+            #     jump_height_range=(0.1, 0.4),
+            #     interval_range=(0.5, 4.0),
+            #     curriculum_range=(0.0, 1.0),
+            # ),
         ]
 
     def get_resets(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reset]:
         return [
-            ksim.RandomJointPositionReset.create(physics_model, {k: v for k, v in ZEROS}, scale=0.1),
-            ksim.RandomJointVelocityReset(),
+            ksim.RandomJointPositionReset.create(
+                physics_model,
+                {k: v for k, v in ZEROS},
+                scale=0.5,
+                scale_by_curriculum=False,
+            ),
+            ksim.RandomJointVelocityReset(
+                scale=0.1,
+                scale_by_curriculum=False,
+            ),
+            ksim.RandomHeightReset(
+                range=(0.05, 0.1),
+            ),
+            ksim.RandomPitchRollReset(
+                pitch_range=(math.radians(-10.0), math.radians(45.0)),
+                roll_range=(math.radians(-5.0), math.radians(5.0)),
+            ),
         ]
 
     def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
@@ -507,7 +533,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                     gait_period=self.config.gait_period,
                     ctrl_dt=self.config.ctrl_dt,
                     max_height=self.config.max_foot_height,
-                    height_offset=0.06,
+                    height_offset=0.12,
                 ),
                 joystick=ksim.JoystickCommand(
                     run_speed=self.config.target_linear_velocity,
@@ -515,32 +541,28 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                     strafe_speed=self.config.target_linear_velocity / 2.0,
                     rotation_speed=self.config.target_angular_velocity,
                     # Only allow forward and standing.
-                    # sample_probs=(0.3, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    sample_probs=(0.2, 0.4, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    # sample_probs=(0.1, 0.4, 0.25, 0.05, 0.1, 0.1, 0.0, 0.0),
                 ),
-            ),
-            ksim.BaseHeightCommand(
-                min_height=0.9,
-                max_height=1.02,
             ),
         ]
 
     def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:
         return [
             # Standard rewards.
-            # ksim.StayAliveReward(balance=2.0, scale=1.0),
-            ksim.BaseHeightTrackingReward(scale=0.5),
+            ksim.StayAliveReward(scale=100.0),
             # ksim.UprightReward(scale=1.0),
             ksim.EasyJoystickReward(
                 gait=ksim.SinusoidalGaitReward(
-                    scale=0.4,
+                    scale=5.0,
                     ctrl_dt=self.config.ctrl_dt,
                     max_height=self.config.max_foot_height,
                 ),
-                joystick=ksim.JoystickReward(scale=0.1),
+                joystick=ksim.JoystickReward(scale=1.0),
                 airtime=ksim.FeetAirTimeReward(
                     threshold=self.config.gait_period / 2.0,
                     ctrl_dt=self.config.ctrl_dt,
-                    scale=0.1,
+                    scale=1.0,
                 ),
             ),
             # Avoid movement penalties.
@@ -560,25 +582,25 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
         return [
-            ksim.BadZTermination(unhealthy_z_lower=0.7, unhealthy_z_upper=1.2),
+            ksim.BadZTermination(unhealthy_z_lower=0.7, unhealthy_z_upper=3.0),
+            ksim.BadVelocityTermination(max_vel=100.0),
             ksim.FarFromOriginTermination(max_dist=10.0),
         ]
 
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
-        # return ksim.DistanceFromOriginCurriculum(
-        #     min_level_steps=5,
-        # )
-        return ksim.ConstantCurriculum(level=1.0)
+        return ksim.DistanceFromOriginCurriculum(
+            min_level_steps=5,
+        )
 
     def get_model(self, params: ksim.InitParams) -> Model:
         return Model(
             params.key,
             physics_model=params.physics_model,
-            num_actor_inputs=56,
+            num_actor_inputs=55,
             num_actor_outputs=len(ZEROS),
-            num_critic_inputs=457,
+            num_critic_inputs=460,
             min_std=0.01,
-            max_std=1.0,
+            max_std=3.0,
             var_scale=self.config.var_scale,
             hidden_size=self.config.hidden_size,
             num_mixtures=self.config.num_mixtures,
@@ -604,8 +626,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
 
         # Foot target height.
         gait_phase_1 = sgj_cmd.gait.phase[..., None]
-
-        base_height_1 = commands["base_height_command"][..., None]
+        foot_tgt_height_2 = sgj_cmd.gait.height
 
         obs = [
             joint_pos_n,  # NUM_JOINTS
@@ -613,7 +634,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             proj_grav_3,  # 3
             imu_gyro_3,  # 3
             gait_phase_1,  # 1
-            base_height_1,  # 1
+            foot_tgt_height_2,  # 2
             joystick_cmd_ohe_8,  # 8
         ]
 
@@ -644,13 +665,13 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
         # Sinusoidal gait joystick command.
         sgj_cmd: ksim.EasyJoystickCommandValue = commands["easy_joystick_command"]
         joystick_cmd_ohe_8 = sgj_cmd.joystick.command
+        joystick_vel_tgts_3 = sgj_cmd.joystick.vels
 
         # Foot height difference.
         foot_height_2 = observations["feet_position_observation"][..., 2]
+        gait_phase_1 = sgj_cmd.gait.phase[..., None]
         foot_tgt_height_2 = sgj_cmd.gait.height
         foot_height_diff_2 = foot_height_2 - foot_tgt_height_2
-
-        base_height_1 = commands["base_height_command"][..., None]
 
         obs_n = jnp.concatenate(
             [
@@ -667,8 +688,9 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                 base_pos_3,  # 3
                 base_quat_4,  # 4
                 joystick_cmd_ohe_8,  # 8
+                joystick_vel_tgts_3,  # 3
+                gait_phase_1,  # 1
                 foot_height_diff_2,  # 2
-                base_height_1,  # 1
             ],
             axis=-1,
         )
@@ -763,16 +785,16 @@ if __name__ == "__main__":
     HumanoidWalkingTask.launch(
         HumanoidWalkingTaskConfig(
             # Training parameters.
-            num_envs=2048,
+            num_envs=4096,
             batch_size=256,
             num_passes=4,
-            rollout_length_frames=24,
+            rollout_length_frames=20,
             # Simulation parameters.
             dt=0.002,
             ctrl_dt=0.02,
             iterations=8,
             ls_iterations=8,
-            action_latency_range=(0.003, 0.01),  # Simulate 3-10ms of latency.
+            action_latency_range=(0.003, 0.005),  # Simulate 3-5ms of latency.
             drop_action_prob=0.05,  # Drop 5% of commands.
             # Visualization parameters.
             render_markers=False,
