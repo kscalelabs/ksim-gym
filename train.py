@@ -541,8 +541,8 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                     strafe_speed=self.config.target_linear_velocity / 2.0,
                     rotation_speed=self.config.target_angular_velocity,
                     # Only allow forward and standing.
-                    sample_probs=(0.2, 0.4, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0),
-                    # sample_probs=(0.1, 0.4, 0.25, 0.05, 0.1, 0.1, 0.0, 0.0),
+                    # sample_probs=(0.2, 0.4, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    sample_probs=(0.1, 0.4, 0.25, 0.05, 0.1, 0.1, 0.0, 0.0),
                 ),
             ),
         ]
@@ -596,7 +596,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
         return Model(
             params.key,
             physics_model=params.physics_model,
-            num_actor_inputs=55,
+            num_actor_inputs=57,
             num_actor_outputs=len(ZEROS),
             num_critic_inputs=460,
             min_std=0.01,
