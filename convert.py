@@ -35,11 +35,11 @@ def main() -> None:
     # Constant values.
     depth = task.config.depth
     hidden_size = task.config.hidden_size
-    carry_shape = (depth * hidden_size + 1,)
+    carry_shape = (depth * hidden_size,)
 
     metadata = PyModelMetadata(
         joint_names=joint_names,
-        num_commands=8,
+        num_commands=3,
         carry_size=carry_shape,
     )
 
@@ -56,12 +56,6 @@ def main() -> None:
         command: Array,
         carry: Array,
     ) -> tuple[Array, Array]:
-        base_height = jnp.full((1,), 0.95)
-        model_carry, gait_phase = carry[..., :-1], carry[..., -1:]
-        model_carry = model_carry.reshape(depth, hidden_size)
-
-        # When not walking, keep the gait phase at 0.
-        gait_phase = jnp.where(command.argmax(axis=-1) != 0, gait_phase, 0.0)
 
         # Call the model.
         obs = jnp.concatenate(
@@ -70,19 +64,13 @@ def main() -> None:
                 joint_angular_velocities,
                 projected_gravity,
                 gyroscope,
-                gait_phase,
-                base_height,
                 command,
             ],
             axis=-1,
         )
-        dist, model_carry = model.actor.forward(obs, model_carry)
+        dist, new_carry = model.actor.forward(obs, carry)
 
-        # Step the gait phase.
-        gait_phase = (gait_phase + 0.02) % task.config.gait_period
-
-        carry = jnp.concatenate([model_carry.reshape(depth * hidden_size), gait_phase], axis=-1)
-        return dist.mode(), carry
+        return dist.mode(), new_carry
 
     init_onnx = export_fn(
         model=init_fn,

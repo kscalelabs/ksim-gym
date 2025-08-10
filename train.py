@@ -57,7 +57,7 @@ class HumanoidWalkingTaskConfig(ksim.PPOConfig):
         help="The depth for the MLPs.",
     )
     num_mixtures: int = xax.field(
-        value=5,
+        value=1,
         help="The number of mixtures for the actor.",
     )
     num_hidden_layers: int = xax.field(
@@ -89,7 +89,7 @@ class HumanoidWalkingTaskConfig(ksim.PPOConfig):
 
     # Optimizer parameters.
     learning_rate: float = xax.field(
-        value=3e-4,
+        value=1e-3,
         help="Learning rate for PPO.",
     )
     grad_clip: float = xax.field(
@@ -177,12 +177,39 @@ class StraightLegPenalty(JointPositionPenalty):
             scale_by_curriculum=scale_by_curriculum,
         )
 
+@attrs.define(frozen=True, kw_only=True)
+class DefaultLegPositionPenalty(JointPositionPenalty):
+    @classmethod
+    def create_penalty(
+        cls,
+        physics_model: ksim.PhysicsModel,
+        scale: float = -1.0,
+        scale_by_curriculum: bool = False,
+    ) -> Self:
+        return cls.create_from_names(
+            names=[
+                "dof_left_hip_pitch_04",
+                "dof_left_hip_roll_03",
+                "dof_left_hip_yaw_03",
+                "dof_left_knee_04",
+                "dof_left_ankle_02",
+                "dof_right_hip_pitch_04",
+                "dof_right_hip_roll_03",
+                "dof_right_hip_yaw_03",
+                "dof_right_knee_04",
+                "dof_right_ankle_02",
+            ],
+            physics_model=physics_model,
+            scale=scale,
+            scale_by_curriculum=scale_by_curriculum,
+        )
+
 
 class Actor(eqx.Module):
     """Actor for the walking task."""
 
     input_proj: eqx.nn.Linear
-    rnns: tuple[eqx.nn.GRUCell, ...]
+    rnns: tuple[eqx.nn.LSTMCell, ...]
     output_proj: eqx.nn.MLP
     num_inputs: int = eqx.field()
     num_outputs: int = eqx.field()
@@ -215,17 +242,17 @@ class Actor(eqx.Module):
             key=input_proj_key,
         )
 
-        # Create RNN layer
+        # Create RNN layers (LSTM)
         key, rnn_key = jax.random.split(key)
         rnn_keys = jax.random.split(rnn_key, depth)
         self.rnns = tuple(
             [
-                eqx.nn.GRUCell(
+                eqx.nn.LSTMCell(
                     input_size=hidden_size,
                     hidden_size=hidden_size,
-                    key=rnn_key,
+                    key=k,
                 )
-                for rnn_key in rnn_keys
+                for k in rnn_keys
             ]
         )
 
@@ -249,11 +276,17 @@ class Actor(eqx.Module):
         self.var_scale = var_scale
 
     def forward(self, obs_n: Array, carry: Array) -> tuple[xax.Distribution, Array]:
+        # carry shape: (2, depth, hidden_size) -> [0]=h, [1]=c
         x_n = self.input_proj(obs_n)
-        out_carries = []
+        new_h = []
+        new_c = []
         for i, rnn in enumerate(self.rnns):
-            x_n = rnn(x_n, carry[i])
-            out_carries.append(x_n)
+            h_i = carry[0, i]
+            c_i = carry[1, i]
+            h_o, c_o = rnn(x_n, (h_i, c_i))
+            x_n = h_o
+            new_h.append(h_o)
+            new_c.append(c_o)
         out_n = self.output_proj(x_n)
 
         # Reshape the output to be a mixture of gaussians.
@@ -273,14 +306,15 @@ class Actor(eqx.Module):
 
         dist_n = xax.MixtureOfGaussians(means_nm=mean_nm, stds_nm=std_nm, logits_nm=logits_nm)
 
-        return dist_n, jnp.stack(out_carries, axis=0)
+        next_carry = jnp.stack([jnp.stack(new_h, axis=0), jnp.stack(new_c, axis=0)], axis=0)
+        return dist_n, next_carry
 
 
 class Critic(eqx.Module):
     """Critic for the walking task."""
 
     input_proj: eqx.nn.Linear
-    rnns: tuple[eqx.nn.GRUCell, ...]
+    rnns: tuple[eqx.nn.LSTMCell, ...]
     output_proj: eqx.nn.MLP
     num_inputs: int = eqx.field()
 
@@ -303,17 +337,17 @@ class Critic(eqx.Module):
             key=input_proj_key,
         )
 
-        # Create RNN layer
+        # Create RNN layers (LSTM)
         key, rnn_key = jax.random.split(key)
         rnn_keys = jax.random.split(rnn_key, depth)
         self.rnns = tuple(
             [
-                eqx.nn.GRUCell(
+                eqx.nn.LSTMCell(
                     input_size=hidden_size,
                     hidden_size=hidden_size,
-                    key=rnn_key,
+                    key=k,
                 )
-                for rnn_key in rnn_keys
+                for k in rnn_keys
             ]
         )
 
@@ -331,14 +365,21 @@ class Critic(eqx.Module):
         self.num_inputs = num_inputs
 
     def forward(self, obs_n: Array, carry: Array) -> tuple[Array, Array]:
+        # carry shape: (2, depth, hidden_size) -> [0]=h, [1]=c
         x_n = self.input_proj(obs_n)
-        out_carries = []
+        new_h = []
+        new_c = []
         for i, rnn in enumerate(self.rnns):
-            x_n = rnn(x_n, carry[i])
-            out_carries.append(x_n)
+            h_i = carry[0, i]
+            c_i = carry[1, i]
+            h_o, c_o = rnn(x_n, (h_i, c_i))
+            x_n = h_o
+            new_h.append(h_o)
+            new_c.append(c_o)
         out_n = self.output_proj(x_n)
 
-        return out_n, jnp.stack(out_carries, axis=0)
+        next_carry = jnp.stack([jnp.stack(new_h, axis=0), jnp.stack(new_c, axis=0)], axis=0)
+        return out_n, next_carry
 
 
 class Model(eqx.Module):
@@ -439,7 +480,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             ksim.LinearPushEvent(
                 linvel=0.2,
                 vel_range=(0.0, 1.0),
-                interval_range=(0.5, 2.0),
+                interval_range=(10.0, 15.0),
                 curriculum_range=(0.0, 1.0),  # Always apply pushes.
             ),
         ]
@@ -502,65 +543,89 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
 
     def get_commands(self, physics_model: ksim.PhysicsModel) -> list[ksim.Command]:
         return [
-            ksim.EasyJoystickCommand(
-                gait=ksim.SinusoidalGaitCommand(
-                    gait_period=self.config.gait_period,
-                    ctrl_dt=self.config.ctrl_dt,
-                    max_height=self.config.max_foot_height,
-                    height_offset=0.06,
-                ),
-                joystick=ksim.JoystickCommand(
-                    run_speed=self.config.target_linear_velocity,
-                    walk_speed=self.config.target_linear_velocity / 2.0,
-                    strafe_speed=self.config.target_linear_velocity / 2.0,
-                    rotation_speed=self.config.target_angular_velocity,
-                    # Only allow forward and standing.
-                    # sample_probs=(0.3, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-                ),
+            # ksim.FloatVectorCommand(
+            #     ranges=((-0.5, 0.5), (-0.5, 0.5)),
+            #     switch_prob=0.005,
+            #     unique_name="target_velocity",
+            #     zero_prob=0.2,
+            # ),
+            ksim.LinearVelocityCommand(
+                x_range=(-0.5, 0.5),
+                y_range=(-0.5, 0.5),
+                x_zero_prob=0.2,
+                y_zero_prob=0.3,
+                switch_prob=0.005,
             ),
-            ksim.BaseHeightCommand(
-                min_height=0.9,
-                max_height=1.02,
+            ksim.FloatVectorCommand(
+                ranges=((-0.5, 0.5),),
+                switch_prob=0.005,
+                unique_name="target_yaw_rate",
+                zero_prob=0.2,
             ),
         ]
 
     def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:
         return [
-            # Standard rewards.
-            # ksim.StayAliveReward(balance=2.0, scale=1.0),
-            ksim.BaseHeightTrackingReward(scale=0.5),
-            # ksim.UprightReward(scale=1.0),
-            ksim.EasyJoystickReward(
-                gait=ksim.SinusoidalGaitReward(
-                    scale=0.4,
-                    ctrl_dt=self.config.ctrl_dt,
-                    max_height=self.config.max_foot_height,
-                ),
-                joystick=ksim.JoystickReward(scale=0.1),
-                airtime=ksim.FeetAirTimeReward(
-                    threshold=self.config.gait_period / 2.0,
-                    ctrl_dt=self.config.ctrl_dt,
-                    scale=0.1,
-                ),
+            ksim.StayAliveReward(scale=10.0),
+            ksim.LinearVelocityTrackingReward(
+                linvel_obs_name="base_linear_velocity_observation",
+                index=("x", "y"),
+                # command_name="target_velocity_float_vector_command",
+                command_name="linear_velocity_command",
+                in_robot_frame=True,
+                scale=0.5,
+                norm="l1",
+                unique_identifier="l1_vel",
             ),
-            # Avoid movement penalties.
-            # ksim.AngularVelocityPenalty(index=("x", "y"), scale=-0.1),
-            # ksim.LinearVelocityPenalty(index=("z"), scale=-0.1),
-            # Normalization penalties.
-            # ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
-            # ksim.JointAccelerationPenalty(scale=-0.01),
-            # ksim.JointJerkPenalty(scale=-0.01),
-            # ksim.LinkAccelerationPenalty(scale=-0.01),
-            # ksim.LinkJerkPenalty(scale=-0.01),
-            # ksim.ActionAccelerationPenalty(scale=-0.01),
-            # Bespoke rewards.
-            # BentArmPenalty.create_penalty(physics_model, scale=-1.0),
-            # StraightLegPenalty.create_penalty(physics_model, scale=-1.0),
+            ksim.LinearVelocityTrackingReward(
+                linvel_obs_name="base_linear_velocity_observation",
+                index=("x", "y"),
+                # command_name="target_velocity_float_vector_command",
+                command_name="linear_velocity_command",
+                in_robot_frame=True,
+                scale=3.0,
+                norm="l2",
+            ),
+            ksim.AngularVelocityTrackingReward(
+                index=("z",),
+                command_name="target_yaw_rate_float_vector_command",
+                scale=0.5,
+                norm="l1",
+                unique_identifier="l1_angvel",
+            ),
+            ksim.AngularVelocityTrackingReward(
+                index=("z",),
+                command_name="target_yaw_rate_float_vector_command",
+                scale=2.0,
+                norm="l2",
+            ),
+            ksim.FeetAirTimeReward(
+                threshold=self.config.gait_period / 2.0,
+                ctrl_dt=self.config.ctrl_dt,
+                scale=1.0,
+            ),
+            ksim.AngularVelocityPenalty(
+                index=("x", "y"),
+                scale=-0.1,
+            ),
+            ksim.LinearVelocityPenalty(
+                index=("z"),
+                scale=-1.0,
+            ),
+            ksim.ActionVelocityPenalty(
+                scale=-0.01,
+            ),
+            ksim.CtrlPenalty(
+                scale=-1e-4,
+            ),
+            BentArmPenalty.create_penalty(physics_model, scale=-1.0),
+            StraightLegPenalty.create_penalty(physics_model, scale=-1.0),
+            DefaultLegPositionPenalty.create_penalty(physics_model, scale=-0.1),
         ]
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
         return [
-            ksim.BadZTermination(unhealthy_z_lower=0.7, unhealthy_z_upper=1.2),
+            ksim.BadZTermination(unhealthy_z_lower=0.3, unhealthy_z_upper=1.2),
             ksim.FarFromOriginTermination(max_dist=10.0),
         ]
 
@@ -574,9 +639,9 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
         return Model(
             params.key,
             physics_model=params.physics_model,
-            num_actor_inputs=56,
+            num_actor_inputs=49,
             num_actor_outputs=len(ZEROS),
-            num_critic_inputs=457,
+            num_critic_inputs=455,
             min_std=0.01,
             max_std=1.0,
             var_scale=self.config.var_scale,
@@ -598,23 +663,17 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
         proj_grav_3 = observations["projected_gravity_observation"]
         imu_gyro_3 = observations["sensor_observation_imu_gyro"]
 
-        # Sinusoidal gait joystick command.
-        sgj_cmd: ksim.EasyJoystickCommandValue = commands["easy_joystick_command"]
-        joystick_cmd_ohe_8 = sgj_cmd.joystick.command
-
-        # Foot target height.
-        gait_phase_1 = sgj_cmd.gait.phase[..., None]
-
-        base_height_1 = commands["base_height_command"][..., None]
+        # target_velocity_2 = commands["target_velocity_float_vector_command"]
+        target_velocity_2 = commands["linear_velocity_command"]
+        target_yaw_rate_1 = commands["target_yaw_rate_float_vector_command"]
 
         obs = [
             joint_pos_n,  # NUM_JOINTS
             joint_vel_n,  # NUM_JOINTS
             proj_grav_3,  # 3
             imu_gyro_3,  # 3
-            gait_phase_1,  # 1
-            base_height_1,  # 1
-            joystick_cmd_ohe_8,  # 8
+            target_velocity_2,  # 2
+            target_yaw_rate_1,  # 1
         ]
 
         obs_n = jnp.concatenate(obs, axis=-1)
@@ -640,17 +699,12 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
         act_frc_obs_n = observations["actuator_force_observation"]
         base_pos_3 = observations["base_position_observation"]
         base_quat_4 = observations["base_orientation_observation"]
+        lin_vel_obs_3 = observations["base_linear_velocity_observation"]
+        ang_vel_obs_3 = observations["base_angular_velocity_observation"]
 
-        # Sinusoidal gait joystick command.
-        sgj_cmd: ksim.EasyJoystickCommandValue = commands["easy_joystick_command"]
-        joystick_cmd_ohe_8 = sgj_cmd.joystick.command
-
-        # Foot height difference.
-        foot_height_2 = observations["feet_position_observation"][..., 2]
-        foot_tgt_height_2 = sgj_cmd.gait.height
-        foot_height_diff_2 = foot_height_2 - foot_tgt_height_2
-
-        base_height_1 = commands["base_height_command"][..., None]
+        # target_velocity_2 = commands["target_velocity_float_vector_command"]
+        target_velocity_2 = commands["linear_velocity_command"]
+        target_yaw_rate_1 = commands["target_yaw_rate_float_vector_command"]
 
         obs_n = jnp.concatenate(
             [
@@ -658,17 +712,18 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                 jnp.cos(time_1),
                 dh_joint_pos_j,  # NUM_JOINTS
                 dh_joint_vel_j / 10.0,  # NUM_JOINTS
-                com_inertia_n,  # 160
-                com_vel_n,  # 96
-                imu_acc_3,  # 3
-                imu_gyro_3,  # 3
-                proj_grav_3,  # 3
+                com_inertia_n,
+                com_vel_n,
+                imu_acc_3,
+                imu_gyro_3,
+                proj_grav_3,
                 act_frc_obs_n / 100.0,  # NUM_JOINTS
-                base_pos_3,  # 3
-                base_quat_4,  # 4
-                joystick_cmd_ohe_8,  # 8
-                foot_height_diff_2,  # 2
-                base_height_1,  # 1
+                base_pos_3,
+                base_quat_4,
+                lin_vel_obs_3,
+                ang_vel_obs_3,
+                target_velocity_2,
+                target_yaw_rate_1,
             ],
             axis=-1,
         )
@@ -733,8 +788,8 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
 
     def get_initial_model_carry(self, model: Model, rng: PRNGKeyArray) -> tuple[Array, Array]:
         return (
-            jnp.zeros(shape=(self.config.depth, self.config.hidden_size)),
-            jnp.zeros(shape=(self.config.depth, self.config.hidden_size)),
+            jnp.zeros(shape=(2, self.config.depth, self.config.hidden_size)),
+            jnp.zeros(shape=(2, self.config.depth, self.config.hidden_size)),
         )
 
     def sample_action(
@@ -763,8 +818,8 @@ if __name__ == "__main__":
     HumanoidWalkingTask.launch(
         HumanoidWalkingTaskConfig(
             # Training parameters.
-            num_envs=2048,
-            batch_size=256,
+            num_envs=4096,
+            batch_size=512,
             num_passes=4,
             rollout_length_frames=24,
             # Simulation parameters.
@@ -772,7 +827,7 @@ if __name__ == "__main__":
             ctrl_dt=0.02,
             iterations=8,
             ls_iterations=8,
-            action_latency_range=(0.003, 0.01),  # Simulate 3-10ms of latency.
+            action_latency_range=(0.001, 0.01),  # Simulate 3-10ms of latency.
             drop_action_prob=0.05,  # Drop 5% of commands.
             # Visualization parameters.
             render_markers=False,
