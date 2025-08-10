@@ -559,7 +559,6 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             ksim.FloatVectorCommand(
                 ranges=((-0.5, 0.5),),
                 switch_prob=0.005,
-                unique_name="target_yaw_rate",
                 zero_prob=0.2,
             ),
         ]
@@ -575,7 +574,6 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                 in_robot_frame=True,
                 scale=0.5,
                 norm="l1",
-                unique_identifier="l1_vel",
             ),
             ksim.LinearVelocityTrackingReward(
                 linvel_obs_name="base_linear_velocity_observation",
@@ -588,14 +586,13 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             ),
             ksim.AngularVelocityTrackingReward(
                 index=("z",),
-                command_name="target_yaw_rate_float_vector_command",
+                command_name="float_vector_command",
                 scale=0.5,
                 norm="l1",
-                unique_identifier="l1_angvel",
             ),
             ksim.AngularVelocityTrackingReward(
                 index=("z",),
-                command_name="target_yaw_rate_float_vector_command",
+                command_name="float_vector_command",
                 scale=2.0,
                 norm="l2",
             ),
@@ -665,7 +662,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
 
         # target_velocity_2 = commands["target_velocity_float_vector_command"]
         target_velocity_2 = commands["linear_velocity_command"]
-        target_yaw_rate_1 = commands["target_yaw_rate_float_vector_command"]
+        target_yaw_rate_1 = commands["float_vector_command"]
 
         obs = [
             joint_pos_n,  # NUM_JOINTS
@@ -704,7 +701,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
 
         # target_velocity_2 = commands["target_velocity_float_vector_command"]
         target_velocity_2 = commands["linear_velocity_command"]
-        target_yaw_rate_1 = commands["target_yaw_rate_float_vector_command"]
+        target_yaw_rate_1 = commands["float_vector_command"]
 
         obs_n = jnp.concatenate(
             [
