@@ -107,7 +107,7 @@ class HumanoidWalkingTaskConfig(ksim.PPOConfig):
         help="The period for the sinusoidal gait command.",
     )
     max_foot_height: float = xax.field(
-        value=0.4,
+        value=0.2,
         help="The maximum height for the sinusoidal gait command.",
     )
 
@@ -509,10 +509,15 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
     def get_events(self, physics_model: ksim.PhysicsModel) -> dict[str, ksim.Event]:
         return {
             "push": ksim.LinearPushEvent(
-                linvel=0.2,
+                linvel=1.0,
                 vel_range=(0.0, 1.0),
-                interval_range=(10.0, 15.0),
-                curriculum_range=(0.0, 1.0),  # Always apply pushes.
+                interval_range=(4.0, 8.0),
+                curriculum_range=(0.0, 1.0),
+            ),
+            "jump": ksim.JumpEvent(
+                jump_height_range=(0.1, 0.3),
+                interval_range=(4.0, 8.0),
+                curriculum_range=(0.0, 1.0),
             ),
         }
 
@@ -610,11 +615,15 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             "stay_alive": ksim.StayAliveReward(scale=100.0),
             "foot_airtime": ksim.FeetAirTimeReward(
                 ctrl_dt=self.config.ctrl_dt,
-                threshold=self.config.gait_period / 2.0,
+                period=self.config.gait_period / 2.0,
+                contact_obs="feet_contact",
+                scale=3.0,
+            ),
+            "foot_height": ksim.FeetHeightReward(
                 contact_obs="feet_contact",
                 position_obs="feet_position",
                 height=self.config.max_foot_height,
-                scale=1.0,
+                scale=10.0,
             ),
             "linvel": ksim.LinearVelocityPenalty(cmd="linvel", scale=-0.1),
             "angvel": ksim.AngularVelocityPenalty(cmd="angvel", scale=-0.01),
@@ -622,12 +631,9 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             "foot_force": ksim.FeetForcePenalty(
                 force_obs="feet_force",
                 bias=346,  # Weight of the robot, in Newtons.
-                scale=-1e-5,
+                scale=-1e-7,
             ),
-            "foot_torque": ksim.FeetTorquePenalty(
-                torque_obs="feet_torque",
-                scale=-1e-6,
-            ),
+            "foot_torque": ksim.FeetTorquePenalty(torque_obs="feet_torque", scale=-1e-8),
             "upright": ksim.UprightReward(scale=0.01),
             "action_velocity": ksim.ActionVelocityPenalty(scale=-0.01),
             "ctrl": ksim.CtrlPenalty(scale=-1e-4),
@@ -645,6 +651,8 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
         return ksim.DistanceFromOriginCurriculum(
             min_level_steps=5,
+            increase_threshold=8.0,
+            decrease_threshold=8.0,
         )
 
     def get_model(self, params: ksim.InitParams) -> Model:
