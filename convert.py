@@ -61,7 +61,7 @@ def main() -> None:
         obs = jnp.concatenate(
             [
                 joint_angles,
-                joint_angular_velocities,
+                joint_angular_velocities / 10.0,
                 projected_gravity,
                 gyroscope,
                 command,
