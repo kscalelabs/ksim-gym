@@ -630,8 +630,8 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                 bias=346,  # Weight of the robot is about 350 Newtons.
                 scale=-1.0,
             ),
-            "action_velocity": ksim.ActionVelocityPenalty(scale=-0.01),
-            "ctrl": ksim.CtrlPenalty(scale=-1e-4),
+            "action_velocity": ksim.ActionVelocityPenalty(scale=-0.1),
+            "ctrl": ksim.CtrlPenalty.create(physics_model, scale=-0.1),
             "bent_arm": BentArmPenalty.create_penalty(physics_model, scale=-1.0),
             "straight_leg": StraightLegPenalty.create_penalty(physics_model, scale=-1.0),
             "default_leg_position": DefaultLegPositionPenalty.create_penalty(physics_model, scale=-0.1),
