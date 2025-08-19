@@ -24,18 +24,22 @@ def main() -> None:
         raise FileNotFoundError(f"Checkpoint path {ckpt_path} does not exist")
 
     task: HumanoidWalkingTask = HumanoidWalkingTask.load_task(ckpt_path)
-    model: Model = task.load_ckpt(ckpt_path, part="model")[0]
+    mujoco_model = task.get_mujoco_model()
+    key = jax.random.PRNGKey(0)
+    init_params = ksim.InitParams(key=key, physics_model=mujoco_model)
+    model: Model = task.load_ckpt(ckpt_path, init_params=init_params, part="model")[0]
 
     # Loads the Mujoco model and gets the joint names.
-    mujoco_model = task.get_mujoco_model()
     joint_names = ksim.get_joint_names_in_order(mujoco_model)[1:]  # Removes the root joint.
 
     # Constant values.
-    carry_shape = (task.config.depth, task.config.hidden_size)
+    depth = task.config.depth
+    hidden_size = task.config.hidden_size
+    carry_shape = (depth * hidden_size,)
 
     metadata = PyModelMetadata(
         joint_names=joint_names,
-        num_commands=None,
+        num_commands=3,
         carry_size=carry_shape,
     )
 
@@ -48,25 +52,25 @@ def main() -> None:
         joint_angles: Array,
         joint_angular_velocities: Array,
         projected_gravity: Array,
-        accelerometer: Array,
         gyroscope: Array,
-        time: Array,
+        command: Array,
         carry: Array,
     ) -> tuple[Array, Array]:
+
+        # Call the model.
         obs = jnp.concatenate(
             [
-                jnp.sin(time),
-                jnp.cos(time),
                 joint_angles,
-                joint_angular_velocities,
+                joint_angular_velocities / 10.0,
                 projected_gravity,
-                accelerometer,
                 gyroscope,
+                command,
             ],
             axis=-1,
         )
-        dist, carry = model.actor.forward(obs, carry)
-        return dist.mode(), carry
+        dist, new_carry = model.actor.forward(obs, carry)
+
+        return dist.mode(), new_carry
 
     init_onnx = export_fn(
         model=init_fn,
