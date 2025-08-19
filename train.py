@@ -4,9 +4,7 @@ import asyncio
 import functools
 import math
 from dataclasses import dataclass
-from typing import Self
 
-import attrs
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -23,23 +21,23 @@ ZEROS: list[tuple[str, float]] = [
     ("dof_right_shoulder_pitch_03", 0.0),
     ("dof_right_shoulder_roll_03", math.radians(-10.0)),
     ("dof_right_shoulder_yaw_02", 0.0),
-    ("dof_right_elbow_02", math.radians(90.0)),
+    ("dof_right_elbow_02", math.radians(45.0)),
     ("dof_right_wrist_00", 0.0),
     ("dof_left_shoulder_pitch_03", 0.0),
     ("dof_left_shoulder_roll_03", math.radians(10.0)),
     ("dof_left_shoulder_yaw_02", 0.0),
-    ("dof_left_elbow_02", math.radians(-90.0)),
+    ("dof_left_elbow_02", math.radians(-45.0)),
     ("dof_left_wrist_00", 0.0),
-    ("dof_right_hip_pitch_04", math.radians(-20.0)),
+    ("dof_right_hip_pitch_04", math.radians(-10.0)),
     ("dof_right_hip_roll_03", math.radians(-0.0)),
     ("dof_right_hip_yaw_03", 0.0),
-    ("dof_right_knee_04", math.radians(-50.0)),
-    ("dof_right_ankle_02", math.radians(30.0)),
-    ("dof_left_hip_pitch_04", math.radians(20.0)),
+    ("dof_right_knee_04", math.radians(-30.0)),
+    ("dof_right_ankle_02", math.radians(20.0)),
+    ("dof_left_hip_pitch_04", math.radians(10.0)),
     ("dof_left_hip_roll_03", math.radians(0.0)),
     ("dof_left_hip_yaw_03", 0.0),
-    ("dof_left_knee_04", math.radians(50.0)),
-    ("dof_left_ankle_02", math.radians(-30.0)),
+    ("dof_left_knee_04", math.radians(30.0)),
+    ("dof_left_ankle_02", math.radians(-20.0)),
 ]
 
 
@@ -57,7 +55,7 @@ class HumanoidWalkingTaskConfig(ksim.PPOConfig):
         help="The depth for the MLPs.",
     )
     num_mixtures: int = xax.field(
-        value=1,
+        value=5,
         help="The number of mixtures for the actor.",
     )
     num_hidden_layers: int = xax.field(
@@ -71,11 +69,11 @@ class HumanoidWalkingTaskConfig(ksim.PPOConfig):
 
     # Reward parameters.
     linear_velocity_range: tuple[float, float] = xax.field(
-        value=(1.0, 4.0),
+        value=(1.0, 3.0),
         help="The range for the linear velocity command.",
     )
     linear_velocity_max_yaw: float = xax.field(
-        value=math.pi / 2.0,
+        value=math.radians(45.0),
         help="The maximum yaw for the linear velocity command.",
     )
     linear_velocity_zero_prob: float = xax.field(
@@ -91,7 +89,7 @@ class HumanoidWalkingTaskConfig(ksim.PPOConfig):
         help="The probability of the linear velocity command being switched.",
     )
     angular_velocity_range: tuple[float, float] = xax.field(
-        value=(-0.2, 0.2),
+        value=(-math.radians(45), math.radians(45)),
         help="The range for the angular velocity command.",
     )
     angular_velocity_zero_prob: float = xax.field(
@@ -103,7 +101,7 @@ class HumanoidWalkingTaskConfig(ksim.PPOConfig):
         help="The probability of the angular velocity command being switched.",
     )
     gait_period: float = xax.field(
-        value=0.8,
+        value=0.6,
         help="The period for the sinusoidal gait command.",
     )
     max_foot_height: float = xax.field(
@@ -128,106 +126,6 @@ class HumanoidWalkingTaskConfig(ksim.PPOConfig):
         value=1e-5,
         help="Weight decay for the Adam optimizer.",
     )
-
-
-@attrs.define(frozen=True, kw_only=True)
-class JointPositionPenalty(ksim.JointDeviationPenalty):
-    @classmethod
-    def create_from_names(
-        cls,
-        names: list[str],
-        physics_model: ksim.PhysicsModel,
-        scale: float = -1.0,
-        scale_by_curriculum: bool = False,
-    ) -> Self:
-        zeros = {k: v for k, v in ZEROS}
-        joint_targets = [zeros[name] for name in names]
-
-        return cls.create(
-            physics_model=physics_model,
-            joint_names=tuple(names),
-            joint_targets=tuple(joint_targets),
-            scale=scale,
-            scale_by_curriculum=scale_by_curriculum,
-        )
-
-
-@attrs.define(frozen=True, kw_only=True)
-class BentArmPenalty(JointPositionPenalty):
-    @classmethod
-    def create_penalty(
-        cls,
-        physics_model: ksim.PhysicsModel,
-        scale: float = -1.0,
-        scale_by_curriculum: bool = False,
-    ) -> Self:
-        return cls.create_from_names(
-            names=[
-                "dof_right_shoulder_pitch_03",
-                "dof_right_shoulder_roll_03",
-                "dof_right_shoulder_yaw_02",
-                "dof_right_elbow_02",
-                "dof_right_wrist_00",
-                "dof_left_shoulder_pitch_03",
-                "dof_left_shoulder_roll_03",
-                "dof_left_shoulder_yaw_02",
-                "dof_left_elbow_02",
-                "dof_left_wrist_00",
-            ],
-            physics_model=physics_model,
-            scale=scale,
-            scale_by_curriculum=scale_by_curriculum,
-        )
-
-
-@attrs.define(frozen=True, kw_only=True)
-class StraightLegPenalty(JointPositionPenalty):
-    @classmethod
-    def create_penalty(
-        cls,
-        physics_model: ksim.PhysicsModel,
-        scale: float = -1.0,
-        scale_by_curriculum: bool = False,
-    ) -> Self:
-        return cls.create_from_names(
-            names=[
-                "dof_left_hip_roll_03",
-                "dof_left_hip_yaw_03",
-                "dof_right_hip_roll_03",
-                "dof_right_hip_yaw_03",
-            ],
-            physics_model=physics_model,
-            scale=scale,
-            scale_by_curriculum=scale_by_curriculum,
-        )
-
-
-@attrs.define(frozen=True, kw_only=True)
-class DefaultLegPositionPenalty(JointPositionPenalty):
-    @classmethod
-    def create_penalty(
-        cls,
-        physics_model: ksim.PhysicsModel,
-        scale: float = -1.0,
-        scale_by_curriculum: bool = False,
-    ) -> Self:
-        return cls.create_from_names(
-            names=[
-                "dof_left_hip_pitch_04",
-                "dof_left_hip_roll_03",
-                "dof_left_hip_yaw_03",
-                "dof_left_knee_04",
-                "dof_left_ankle_02",
-                "dof_right_hip_pitch_04",
-                "dof_right_hip_roll_03",
-                "dof_right_hip_yaw_03",
-                "dof_right_knee_04",
-                "dof_right_ankle_02",
-            ],
-            physics_model=physics_model,
-            scale=scale,
-            scale_by_curriculum=scale_by_curriculum,
-        )
 
 
 class Actor(eqx.Module):
@@ -458,10 +356,13 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             warmup_steps=self.config.warmup_steps,
         )
 
+        def decay_mask(pytree: PyTree) -> PyTree:
+            return jax.tree.map(lambda w: w.ndim >= 2, pytree)
+
         return optax.chain(
             optax.zero_nans(),
             optax.clip_by_global_norm(self.config.grad_clip),
-            optax.add_decayed_weights(self.config.adam_weight_decay),
+            optax.masked(optax.add_decayed_weights(self.config.adam_weight_decay), decay_mask),
             optax.scale_by_adam(),
             optax.scale_by_schedule(scheduler),
             optax.scale(-1.0),
@@ -620,32 +521,19 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                 height=self.config.max_foot_height,
                 scale=10.0,
             ),
-            "upright": ksim.UprightReward(scale=0.5),
-            "linvel": ksim.LinearVelocityPenalty(cmd="linvel", scale=-0.1),
-            "angvel": ksim.AngularVelocityPenalty(cmd="angvel", scale=-0.01),
-            # Penalties.
-            "foot_force": ksim.ForcePenalty(
-                force_obs="feet_force",
-                ctrl_dt=self.config.ctrl_dt,
-                bias=346,  # Weight of the robot is about 350 Newtons.
-                scale=-1.0,
-            ),
-            "action_velocity": ksim.ActionVelocityPenalty(scale=-0.1),
-            "ctrl": ksim.CtrlPenalty.create(physics_model, scale=-0.1),
-            "bent_arm": BentArmPenalty.create_penalty(physics_model, scale=-1.0),
-            "straight_leg": StraightLegPenalty.create_penalty(physics_model, scale=-1.0),
-            "default_leg_position": DefaultLegPositionPenalty.create_penalty(physics_model, scale=-0.1),
+            "linvel": ksim.LinearVelocityReward(cmd="linvel", scale=1.0),
+            "angvel": ksim.AngularVelocityReward(cmd="angvel", scale=0.1),
         }
 
     def get_terminations(self, physics_model: ksim.PhysicsModel) -> dict[str, ksim.Termination]:
         return {
-            "bad_z": ksim.BadZTermination(unhealthy_z_lower=0.3, unhealthy_z_upper=1.2),
+            "bad_z": ksim.BadZTermination(min_z=0.3, final_min_z=0.6, max_z=1.2),
             "far_from_origin": ksim.FarFromOriginTermination(max_dist=20.0),
         }
 
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
         return ksim.DistanceFromOriginCurriculum(
-            min_level_steps=5,
+            min_level_steps=25,
             increase_threshold=8.0,
             decrease_threshold=8.0,
         )
@@ -856,10 +744,13 @@ if __name__ == "__main__":
             ctrl_dt=0.02,
             iterations=8,
             ls_iterations=8,
-            action_latency_range=(0.001, 0.01),  # Simulate 3-10ms of latency.
+            action_latency_range=(0.001, 0.01),  # Simulate 1-10ms of latency.
             drop_action_prob=0.05,  # Drop 5% of commands.
             # Visualization parameters.
-            render_markers=False,
+            # If running this on Mac and you are getting segaults,
+            # you might need to disable `render_markers`
+            render_markers=True,
             render_track_body_id=0,
+            disable_multiprocessing=True,
         ),
     )
