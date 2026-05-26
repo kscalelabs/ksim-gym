@@ -1,6 +1,9 @@
 # requirements.txt
 
 # Training dependencies
+jax>=0.6.2,<0.7
+mujoco==3.3.2
+mujoco-mjx==3.3.2
 ksim==0.1.3
 xax==0.3.0
 mujoco-scenes

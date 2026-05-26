@@ -38,9 +38,13 @@ cd ksim-gym
 
 ```bash
 pip install -r requirements.txt
-pip install 'jax[cuda12]'  # If using GPU machine, install JAX CUDA libraries
+pip install 'jax[cuda12]>=0.6.2,<0.7'  # If using GPU machine, install JAX CUDA libraries
 python -c "import jax; print(jax.default_backend())" # Should print "gpu"
 ```
+
+The template pins JAX and MuJoCo to the currently supported compatibility
+window. Installing unpinned JAX 0.7+ can break transitive dependencies that
+still reference deprecated JAX internals.
 
 6. Train a policy:
   - Your robot should be walking within ~80 training steps, which takes 30 minutes on an RTX 4090 GPU.

@@ -369,17 +369,17 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             metadata=metadata,
         )
 
-    def get_physics_randomizers(self, physics_model: ksim.PhysicsModel) -> list[ksim.PhysicsRandomizer]:
-        return [
+    def get_physics_randomizers(self, physics_model: ksim.PhysicsModel) -> tuple[ksim.PhysicsRandomizer, ...]:
+        return (
             ksim.StaticFrictionRandomizer(),
             ksim.ArmatureRandomizer(),
             ksim.AllBodiesMassMultiplicationRandomizer(scale_lower=0.95, scale_upper=1.05),
             ksim.JointDampingRandomizer(),
             ksim.JointZeroPositionRandomizer(scale_lower=math.radians(-2), scale_upper=math.radians(2)),
-        ]
+        )
 
-    def get_events(self, physics_model: ksim.PhysicsModel) -> list[ksim.Event]:
-        return [
+    def get_events(self, physics_model: ksim.PhysicsModel) -> tuple[ksim.Event, ...]:
+        return (
             ksim.PushEvent(
                 x_force=1.0,
                 y_force=1.0,
@@ -390,16 +390,16 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                 z_angular_force=0.0,
                 interval_range=(0.5, 4.0),
             ),
-        ]
+        )
 
-    def get_resets(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reset]:
-        return [
+    def get_resets(self, physics_model: ksim.PhysicsModel) -> tuple[ksim.Reset, ...]:
+        return (
             ksim.RandomJointPositionReset.create(physics_model, {k: v for k, v in ZEROS}, scale=0.1),
             ksim.RandomJointVelocityReset(),
-        ]
+        )
 
-    def get_observations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Observation]:
-        return [
+    def get_observations(self, physics_model: ksim.PhysicsModel) -> tuple[ksim.Observation, ...]:
+        return (
             ksim.TimestepObservation(),
             ksim.JointPositionObservation(noise=math.radians(2)),
             ksim.JointVelocityObservation(noise=math.radians(10)),
@@ -429,13 +429,13 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
                 sensor_name="imu_gyro",
                 noise=math.radians(10),
             ),
-        ]
+        )
 
-    def get_commands(self, physics_model: ksim.PhysicsModel) -> list[ksim.Command]:
-        return []
+    def get_commands(self, physics_model: ksim.PhysicsModel) -> tuple[ksim.Command, ...]:
+        return ()
 
-    def get_rewards(self, physics_model: ksim.PhysicsModel) -> list[ksim.Reward]:
-        return [
+    def get_rewards(self, physics_model: ksim.PhysicsModel) -> tuple[ksim.Reward, ...]:
+        return (
             # Standard rewards.
             ksim.NaiveForwardReward(clip_max=1.25, in_robot_frame=False, scale=3.0),
             ksim.NaiveForwardOrientationReward(scale=1.0),
@@ -443,7 +443,7 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             ksim.UprightReward(scale=0.5),
             # Avoid movement penalties.
             ksim.AngularVelocityPenalty(index=("x", "y"), scale=-0.1),
-            ksim.LinearVelocityPenalty(index=("z"), scale=-0.1),
+            ksim.LinearVelocityPenalty(index=("z",), scale=-0.1),
             # Normalization penalties.
             ksim.AvoidLimitsPenalty.create(physics_model, scale=-0.01),
             ksim.JointAccelerationPenalty(scale=-0.01, scale_by_curriculum=True),
@@ -454,13 +454,13 @@ class HumanoidWalkingTask(ksim.PPOTask[HumanoidWalkingTaskConfig]):
             # Bespoke rewards.
             BentArmPenalty.create_penalty(physics_model, scale=-0.1),
             StraightLegPenalty.create_penalty(physics_model, scale=-0.1),
-        ]
+        )
 
-    def get_terminations(self, physics_model: ksim.PhysicsModel) -> list[ksim.Termination]:
-        return [
+    def get_terminations(self, physics_model: ksim.PhysicsModel) -> tuple[ksim.Termination, ...]:
+        return (
             ksim.BadZTermination(unhealthy_z_lower=0.6, unhealthy_z_upper=1.2),
             ksim.FarFromOriginTermination(max_dist=10.0),
-        ]
+        )
 
     def get_curriculum(self, physics_model: ksim.PhysicsModel) -> ksim.Curriculum:
         return ksim.DistanceFromOriginCurriculum(
